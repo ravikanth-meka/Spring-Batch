@@ -1,0 +1,100 @@
+package com.citi.risk.rcast.batch.tasklet;
+
+
+import static com.citi.risk.rcast.util.BatchUtil.PUT;
+
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+
+import org.apache.log4j.Logger;
+import org.springframework.batch.core.StepContribution;
+import org.springframework.batch.core.scope.context.ChunkContext;
+import org.springframework.batch.core.step.tasklet.Tasklet;
+import org.springframework.batch.repeat.RepeatStatus;
+import org.springframework.beans.factory.annotation.Autowired;
+
+import com.citi.risk.rcast.domain.crmr.BusinessHierarchy;
+import com.citi.risk.rcast.domain.rcast.RcastCstOutboundFeedFreval;
+import com.citi.risk.rcast.domain.rcast.RcastIcgStatus;
+import com.citi.risk.rcast.domain.rcast.Summary;
+import com.citi.risk.rcast.exception.BusinessException;
+import com.citi.risk.rcast.repo.crmr.CrmrRepository;
+import com.citi.risk.rcast.service.RcastIcgStatusService;
+import com.citi.risk.rcast.util.AppConstants;
+
+public class IdrIntegrationPreparationTasklet implements Tasklet {
+
+	private static final Logger log = Logger.getLogger(IdrIntegrationPreparationTasklet.class);
+    
+    @Autowired
+    CrmrRepository crmrRepository;
+    
+    @Autowired
+    RcastIcgStatusService icgStatusService;
+
+	@Override
+	public RepeatStatus execute(StepContribution stepContribution, ChunkContext chunkContext) throws Exception {
+
+		RcastIcgStatus cobInfo = prepareCobInfo(chunkContext.getStepContext().getStepExecution().getJobExecution().getJobParameters().getString("asof"));
+		
+		PUT(chunkContext,AppConstants.BATCH_PARAM_KEY_STATUS,cobInfo);
+		
+		Map<String,String> gocMap = prepareGocData(cobInfo);
+		
+		PUT(chunkContext,AppConstants.BATCH_PARAM_KEY_GOCMAP,gocMap);
+		PUT(chunkContext,AppConstants.BATCH_PARAM_KEY_SUMMARY_REPORT,new Summary());
+		PUT(chunkContext,AppConstants.BATCH_PARAM_KEY_FINAL_REPORT,new ArrayList<RcastCstOutboundFeedFreval>());
+		
+		
+		return RepeatStatus.FINISHED;
+	}
+
+	public RcastIcgStatus prepareCobInfo(String asof) throws BusinessException {
+		RcastIcgStatus status = icgStatusService.getMaxStatusByCob(asof);
+		if(status==null){
+			throw new BusinessException(RcastIcgStatus.class,AppConstants.MESSAGE_NO_MAX_COB);
+		}
+		return status;
+	}
+
+	public Map<String, String> prepareGocData(RcastIcgStatus status) throws BusinessException {
+		Map<String, String> gocMap = prepareGocMapping(status);
+		if(gocMap==null || gocMap.size()==0){
+			throw new BusinessException(BusinessHierarchy.class,String.format(AppConstants.MESSAGE_NO_BUSINESS_HIERARCHY,status.getAsOf(),status.getJobId()));
+		}
+		return gocMap;
+	}
+
+
+	private Map<String, String> prepareGocMapping(RcastIcgStatus status) {
+		//----------------------------2 GOC Mapping------------------------------------------------
+		//process + filtering
+		List<BusinessHierarchy> bus = crmrRepository.findByAsOf(status.getAsOf());
+		
+		log.info("Preparing GOC Map using business hierarchy data, size:"+bus.size());
+		
+		Map<String,String> gocMap = new HashMap<String,String>();
+		for(BusinessHierarchy bh:bus){
+			if(gocMap.get(bh.getLevel12())!=null){
+				log.debug("Duplicated level 12 code["+bh.getLevel12()+",gocid:"+bh.getGocId()+"] found when build goc map");
+			}
+			gocMap.put(bh.getLevel12(), bh.getGocId()==null?null:bh.getGocId().replace(AppConstants.BIZ_DATA_GOC_TRASH_PREFIX, ""));
+		}
+		return gocMap;
+	}
+
+	public void setCrmrRepository(CrmrRepository crmrRepository) {
+		this.crmrRepository = crmrRepository;
+	}
+
+
+	public void setIcgStatusService(RcastIcgStatusService icgStatusService) {
+		this.icgStatusService = icgStatusService;
+	}
+
+
+	
+
+}
