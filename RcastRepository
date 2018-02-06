@@ -1,0 +1,155 @@
+package com.citi.risk.rcast.repo.rcastbatch;
+
+import java.sql.PreparedStatement;
+import java.sql.SQLException;
+import java.util.ArrayList;
+import java.util.List;
+
+import org.apache.log4j.Logger;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.jdbc.core.BatchPreparedStatementSetter;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.core.SqlParameterValue;
+import org.springframework.jdbc.core.SqlTypeValue;
+import org.springframework.jdbc.core.StatementCreatorUtils;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.stereotype.Repository;
+import org.springframework.transaction.TransactionStatus;
+import org.springframework.transaction.support.TransactionCallback;
+import org.springframework.transaction.support.TransactionTemplate;
+
+import com.citi.risk.rcast.domain.rcast.RcastCstOutboundFeedFreval;
+import com.citi.risk.rcast.util.AppConstants;
+import com.google.common.collect.Lists;
+
+@Repository
+public class RcastRepository {
+	private static Logger log = Logger.getLogger(RcastRepository.class);
+
+	@Autowired
+	@Qualifier("rcastJdbcTemplateBatch")
+	JdbcTemplate jdbcTemplate;
+	
+	
+	@Value("${rcast.batch.size}")
+	private int batchSize;
+	
+	public int[] batchIntertReport(List<RcastCstOutboundFeedFreval> feed) throws SQLException{
+		
+		if(feed==null || feed.size()<1){
+			return null;
+		}
+		
+		List<Object[]> batchArgs = buildBatchArgs(feed);
+		List<List<Object[]>> batchLists = Lists.partition(batchArgs, batchSize);
+		
+		
+		feed=null;
+		TransactionTemplate transactionTemplate = getTransactionTemplate();
+		
+		return transactionTemplate.execute(new TransactionCallback<int[]>(){
+			private Logger log = Logger.getLogger(this.getClass());
+			@Override
+			public int[] doInTransaction(TransactionStatus status) {
+				
+				int[] result = null;
+				try {
+					
+					//result = jdbcTemplate.batchUpdate(AppConstants.SQL_INSERT_IDR_DATA_ROWS_REPORT, batchArgs);
+										
+					
+					for (final List<Object[]> batch : batchLists) {
+					result = jdbcTemplate.batchUpdate(AppConstants.SQL_INSERT_IDR_DATA_ROWS_REPORT, 
+					
+					new BatchPreparedStatementSetter() {
+
+						@Override
+						public int getBatchSize() {
+							return batch.size();
+						}
+
+						@Override
+						public void setValues(PreparedStatement ps, int i) throws SQLException {
+							
+							Object[] values = batch.get(i);
+							//setStatementParameters(values, ps, new int[0]);
+							int[] columnTypes = new int[0];
+							int colIndex = 0;
+							for (Object value : values) {
+								colIndex++;
+								if (value instanceof SqlParameterValue) {
+									SqlParameterValue paramValue = (SqlParameterValue) value;
+									StatementCreatorUtils.setParameterValue(ps, colIndex, paramValue, paramValue.getValue());
+								}
+								else {
+									int colType;
+									if (columnTypes == null || columnTypes.length < colIndex) {
+										colType = SqlTypeValue.TYPE_UNKNOWN;
+									}
+									else {
+										colType = columnTypes[colIndex - 1];
+									}
+									StatementCreatorUtils.setParameterValue(ps, colIndex, colType, value);
+								}
+							}
+						}
+					});
+					log.info(result.length+" inserted to DB -- batch insert");
+					}
+					
+		        } catch (Exception e) {
+		        	status.setRollbackOnly();
+		        	throw new RuntimeException("DB operation failed",e);
+		        }
+				return result;
+			}
+		});
+		
+	}
+	
+	protected List<Object[]> buildBatchArgs(List<RcastCstOutboundFeedFreval> feed) {
+		List<Object[]> batchArgs = new ArrayList<Object[]>();
+		
+		for(RcastCstOutboundFeedFreval rc:feed){
+			Object[] arg = new Object[]{rc.getIdrJobId(),rc.getIcgJobId(),rc.getRcastSource(),rc.getReportingPeriod(),rc.getForecastPeriod(),rc.getReportingBasis(),rc.getStressed(),rc.getLegalVehicle(),rc.getGsstCategoryLevel2(),rc.getCountryRisk(),rc.getRegion(),rc.getLevel9(),rc.getPaaCategory(),rc.getTierIIIBusiness(),rc.getStressLevel1(),rc.getUpPL(),rc.getDownPL(),rc.getSlopeLevelUp200PL(),rc.getSlopeLevelDown125PL(),rc.getFullYear1974PL(),rc.getCb1974PL(),rc.getFullYear2008PL(),rc.getCb2008PL(),rc.getDeepDownturnPL(),rc.getLostDecadePL(),rc.getDollarDeclinePL(),rc.getDesk(),rc.getDivision(),rc.getCalcType(),rc.getIvastInclusionFlag(),rc.getGoc(),rc.getInterestRateShockPL(),rc.getCrmrFs(),rc.getAccountingType(),rc.getGfcid(),rc.getLegalVehicleCode(),rc.getDollarCollapsePL(),rc.getDoubleDipPL(),rc.getDelayedRecoveryPL(),rc.getFrsFDL(),rc.getFrsBU(),rc.getMarketValue(),rc.getNotionalValue(),rc.getRfType(),rc.getMarket(),rc.getDataType(),rc.getLastUpdated(),rc.getLastUpdatedBy(),rc.getLevel12(),rc.getIsFullReval(),rc.getLevel5(),rc.getIsliquidityAdjusted()};
+			batchArgs.add(arg);
+		}
+		return batchArgs;
+	}
+	
+	protected TransactionTemplate getTransactionTemplate() {
+		TransactionTemplate transactionTemplate = new TransactionTemplate();
+		transactionTemplate.setTransactionManager(new DataSourceTransactionManager(jdbcTemplate.getDataSource()));
+		return transactionTemplate;
+	}
+
+	public int[] executeBatch(String[] sqls) {
+		
+		
+		TransactionTemplate transactionTemplate = getTransactionTemplate();
+		
+		return transactionTemplate.execute(new TransactionCallback<int[]>(){
+			private Logger log = Logger.getLogger(this.getClass());
+			@Override
+			public int[] doInTransaction(TransactionStatus status) {
+				
+				int[] result = null;
+				try {
+					
+					result = jdbcTemplate.batchUpdate(sqls);
+					log.info(result.length+" inserted to DB");
+		        } catch (Exception e) {
+		        	status.setRollbackOnly();
+		        	throw new RuntimeException("DB operation failed",e);
+		        }
+				return result;
+			}
+			
+		});
+	}
+
+	
+}
+
