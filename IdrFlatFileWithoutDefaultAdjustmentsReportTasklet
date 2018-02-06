@@ -1,0 +1,303 @@
+package com.citi.risk.rcast.batch.tasklet;
+
+import static com.citi.risk.rcast.util.BatchUtil.GET;
+import static com.citi.risk.rcast.util.BatchUtil.PUT;
+
+import java.io.IOException;
+import java.sql.SQLException;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
+
+import org.apache.commons.lang.SerializationUtils;
+import org.apache.commons.lang.StringUtils;
+import org.apache.log4j.Logger;
+import org.springframework.batch.core.JobExecution;
+import org.springframework.batch.core.StepContribution;
+import org.springframework.batch.core.scope.context.ChunkContext;
+import org.springframework.batch.core.step.tasklet.Tasklet;
+import org.springframework.batch.repeat.RepeatStatus;
+import org.springframework.beans.factory.annotation.Autowired;
+
+import com.citi.risk.rcast.domain.crmr.StressData;
+import com.citi.risk.rcast.domain.rcast.RatingShock;
+import com.citi.risk.rcast.domain.rcast.RcastCstOutboundFeedFreval;
+import com.citi.risk.rcast.domain.rcast.RcastIcgStatus;
+import com.citi.risk.rcast.domain.rcast.Summary;
+import com.citi.risk.rcast.exception.BusinessException;
+import com.citi.risk.rcast.exception.ErrorException;
+import com.citi.risk.rcast.repo.crmr.CrmrRepository;
+import com.citi.risk.rcast.service.RatingMappingService;
+import com.citi.risk.rcast.service.RatingShockService;
+import com.citi.risk.rcast.service.RcastCstOutboundFeedFrevalService;
+import com.citi.risk.rcast.util.AppConstants;
+import com.citi.risk.rcast.util.CommonUtility;
+
+public class IdrFlatFileWithoutDefaultAdjustmentsReportTasklet implements Tasklet {
+
+    private static final Logger log = Logger.getLogger(IdrFlatFileWithoutDefaultAdjustmentsReportTasklet.class);
+    
+    @Autowired
+    CrmrRepository crmrRepository;
+    
+    @Autowired
+    RcastCstOutboundFeedFrevalService feedService;
+    
+    @Autowired
+    RatingMappingService mappingService;
+    
+    @Autowired
+    RatingShockService shockService;
+    
+    
+	@Override
+	public RepeatStatus execute(StepContribution stepContribution, ChunkContext chunkContext) throws Exception {
+		log.info("IdrFlatFileWithoutDefaultAdjustmentsReportTasklet - execute - starting");
+		RcastIcgStatus status = GET(chunkContext,AppConstants.BATCH_PARAM_KEY_STATUS,RcastIcgStatus.class);
+		Map<String, String> gocMap = GET(chunkContext,AppConstants.BATCH_PARAM_KEY_GOCMAP,Map.class);
+		Summary summary = GET(chunkContext,AppConstants.BATCH_PARAM_KEY_SUMMARY_REPORT,Summary.class);
+		List<RcastCstOutboundFeedFreval> finalReport = GET(chunkContext,AppConstants.BATCH_PARAM_KEY_FINAL_REPORT,List.class);
+		
+
+		if(status!=null&&gocMap!=null){
+			finalReport.addAll(createWithoutDefaultReport(summary,status, gocMap,chunkContext.getStepContext().getStepExecution().getJobExecution()));
+		}
+		
+		
+		PUT(chunkContext,AppConstants.BATCH_PARAM_KEY_SUMMARY_REPORT,summary);
+		PUT(chunkContext,AppConstants.BATCH_PARAM_KEY_FINAL_REPORT,finalReport);
+		summary =null;
+		finalReport =null;
+		log.info("IdrFlatFileWithoutDefaultAdjustmentsReportTasklet - execute - completed");
+		return RepeatStatus.FINISHED;
+	}
+	public List<RcastCstOutboundFeedFreval> createWithoutDefaultReport(Summary summary,RcastIcgStatus status, Map<String, String> gocMap, JobExecution je) throws SQLException, IOException, BusinessException, ErrorException {
+		log.info("IdrFlatFileWithoutDefaultAdjustmentsReportTasklet - createWithoutDefaultReport - started");
+		List<RcastCstOutboundFeedFreval> records = createWithoutDefaultFlatFileReportBase(summary,status, gocMap, je);
+		List<RcastCstOutboundFeedFreval> finalExtra = createExtraRecoveryRateStressesReport(status, records);
+		
+		List<RcastCstOutboundFeedFreval> finalList = new ArrayList<RcastCstOutboundFeedFreval>();
+		finalList.addAll(records);
+		finalList.addAll(finalExtra);
+		
+		records=null;
+		finalExtra = null;
+		
+		for(RcastCstOutboundFeedFreval csf:finalList){
+			if(csf.getGsstCategoryLevel2()!=null && csf.getGsstCategoryLevel2().equals("CVA_Hedges") 
+			&& csf.getIvastInclusionFlag()!=null && csf.getIvastInclusionFlag().equals("N")){
+				csf.setIvastInclusionFlag("Y");
+			}
+		}
+		if(summary!=null){
+			summary.setIdrFlatWithoutDefaultGoodDataCount(finalList.size()-summary.getIdrFlatWithoutDefaultExceptionDataCount());
+		}
+		
+		CommonUtility.enrichFinalReportsCommonInfo(finalList, je);
+		log.info("IdrFlatFileWithoutDefaultAdjustmentsReportTasklet - createWithoutDefaultReport - completed");		
+		return finalList;
+		
+	}
+
+
+	public List<RcastCstOutboundFeedFreval> createExtraRecoveryRateStressesReport(RcastIcgStatus status,
+			List<RcastCstOutboundFeedFreval> filtered) throws BusinessException, ErrorException {
+		//----------------------------4 stress data flat------------------------------------------------
+//		List<StressData> stressDataList = crmrRepository.getStressDataAfterGroupByRefined(status.getAsOf());
+		List<StressData> stressDataList = crmrRepository.getStressDataBeforeGroupedBy(status.getAsOf());
+		log.info("IdrFlatFileWithoutDefaultAdjustmentsReportTasklet - createExtraRecoveryRateStressesReport - Total stress data Records from DB: "+stressDataList.size()+" for :"+status.getAsOf());
+		
+		if(stressDataList==null||stressDataList.size()==0){
+			throw new BusinessException(StressData.class,String.format(AppConstants.BIZ_ERROR_NO_STRESSDATA,status.getAsOf(),status.getJobId()));
+		}
+		
+		//----------------------------5 rating mapping------------------------------------------------
+		Map<String,String> ratingMap = mappingService.getReferenceRatingMap(status.getAsOf());
+		Map<String, RatingShock> ratingStressMap = shockService.getReferenceRatingStressMap(status.getAsOf());
+		
+		Map<String, StressData> calcGroupDataForStressedRecoveryRate = new HashMap<String, StressData>();
+		
+		
+		for(StressData stressDataRow:stressDataList){
+			
+			//process headge or asset/liability for cva
+			if(stressDataRow.getLevel2().equals("CVA")){
+				if(stressDataRow.getLevel9().endsWith("HDG")){
+					stressDataRow.setHedgeAssetLiabilityType("Hedge");
+				}else{
+					stressDataRow.setHedgeAssetLiabilityType("Asset/Liability");
+				}
+			}else{
+				stressDataRow.setHedgeAssetLiabilityType("Non-CVA");
+			}
+			
+			//update rating
+			stressDataRow.setRating(ratingMap.get(StringUtils.isEmpty(stressDataRow.getRiskRating())?"99":stressDataRow.getRiskRating()));
+			
+			
+			//set derived fields
+			try{
+				stressDataRow.setHypotheticalScenShock(ratingStressMap.get(stressDataRow.getRating()).getHypotheticalShock());
+				stressDataRow.setHistoricalScenShock(ratingStressMap.get(stressDataRow.getRating()).getHistoricalShock());
+			}catch(Exception e){
+				throw new ErrorException(String.format(AppConstants.BIZ_ERROR_RATING_MAPPING_SHOCK,stressDataRow.getRiskRating(),stressDataRow.getRating()));
+			}
+			//set pnl
+			stressDataRow.setHypotheticalScenStressedPnl(stressDataRow.getSumOfFS_AMT()*stressDataRow.getHypotheticalScenShock()*100);
+			stressDataRow.setHistoricalScenStressedPnl(stressDataRow.getSumOfFS_AMT()*stressDataRow.getHistoricalScenShock()*100);
+			
+			//group by now!!!!!!!!! pivot table
+			
+			//filter first
+						
+			if(AppConstants.rbcExcludes.contains(stressDataRow.getRbc()) || AppConstants.hedgeALExcludes.contains(stressDataRow.getHedgeAssetLiabilityType()) || AppConstants.subproductCodeExcludes.contains(stressDataRow.getSubprodCode())){
+				continue;
+			}else{
+				StressData groupedStressData =calcGroupDataForStressedRecoveryRate.get(stressDataRow.getLevel9());
+				if(groupedStressData==null){
+					groupedStressData = new StressData();
+					groupedStressData.setHypotheticalScenStressedPnl(0D);
+					groupedStressData.setHistoricalScenStressedPnl(0D);
+					groupedStressData.setLevel9(stressDataRow.getLevel9());
+				}
+				
+				groupedStressData.setHypotheticalScenStressedPnl(groupedStressData.getHypotheticalScenStressedPnl()+stressDataRow.getHypotheticalScenStressedPnl());
+				groupedStressData.setHistoricalScenStressedPnl(groupedStressData.getHistoricalScenStressedPnl()+stressDataRow.getHistoricalScenStressedPnl());
+				
+				calcGroupDataForStressedRecoveryRate.put(stressDataRow.getLevel9(), groupedStressData);
+			}
+			
+			//group by done, stored to map
+		}
+		
+		log.info("group by stress data by LEVEL_9:"+calcGroupDataForStressedRecoveryRate.size());
+		
+		Map<String, RcastCstOutboundFeedFreval> rawDataFilteredForExtraKeyedByLevel9 = new HashMap<String, RcastCstOutboundFeedFreval>();
+		
+		//List<RcastCstOutboundFeedFreval> filtered
+		for(RcastCstOutboundFeedFreval freval:filtered){
+			
+			if(freval.getPaaCategory().startsWith(AppConstants.BIZ_DATA_EXTRA_KEEPS_PAA_START) || AppConstants.extraKeeps.contains(freval.getPaaCategory())){
+				if(rawDataFilteredForExtraKeyedByLevel9.get(freval.getLevel9())!=null){
+					log.info("Ferval Record found in extra report for stress data "+freval.getLevel9()+" already , ignore this one!");
+					continue;
+				}
+				rawDataFilteredForExtraKeyedByLevel9.put(freval.getLevel9(), freval);
+			}
+		}
+		
+		List<RcastCstOutboundFeedFreval> finalExtra = new ArrayList<RcastCstOutboundFeedFreval>();
+		for(String level9:calcGroupDataForStressedRecoveryRate.keySet()){
+			RcastCstOutboundFeedFreval fe = null;
+			if(rawDataFilteredForExtraKeyedByLevel9.containsKey(level9)){
+				fe = rawDataFilteredForExtraKeyedByLevel9.get(level9);
+				fe = (RcastCstOutboundFeedFreval) SerializationUtils.clone(fe);
+				fe.setTierIIIBusiness(fe.getTierIIIBusiness()+AppConstants.BIZ_DATA_T3_BUSENISS_SUFFIX);
+
+				//process Excel formula
+				fe.setFullYear1974PL(Double.valueOf(String.format("%.9f", calcGroupDataForStressedRecoveryRate.get(level9).getHistoricalScenStressedPnl()/1000000D)));
+				fe.setCb1974PL(fe.getFullYear1974PL());
+				fe.setFullYear2008PL(fe.getFullYear1974PL());
+				fe.setCb2008PL(fe.getFullYear1974PL());
+				
+				//process Excel formula
+				fe.setDeepDownturnPL(Double.valueOf(String.format("%.9f", calcGroupDataForStressedRecoveryRate.get(level9).getHypotheticalScenStressedPnl()/1000000D)));
+				fe.setLostDecadePL(fe.getDeepDownturnPL());
+				fe.setDollarDeclinePL(fe.getDeepDownturnPL());
+				fe.setInterestRateShockPL(fe.getDeepDownturnPL());
+				
+				//blank or zero out PL columns for this extra set
+				fe.setUpPL(0.0);
+				fe.setDownPL(0.0);
+				fe.setSlopeLevelUp200PL(0.0);
+				fe.setSlopeLevelDown125PL(0.0);
+				fe.setDollarCollapsePL(0.0);
+				fe.setDoubleDipPL(0.0);
+				fe.setDelayedRecoveryPL(0.0);
+				fe.setCrmrFs(0.0);
+				
+				
+				
+				finalExtra.add(fe);
+			}else{
+				log.info("Filtered out extra calculated group data record with level9:"+level9);
+			}
+		}
+		return finalExtra;
+	}
+
+	public List<RcastCstOutboundFeedFreval> createWithoutDefaultFlatFileReportBase(Summary summary, RcastIcgStatus status,
+			Map<String, String> gocMap, JobExecution je) throws BusinessException, SQLException {
+		//---------------------------1 Get Flat File 1-----------------------------------------------
+		List<RcastCstOutboundFeedFreval> flatfileRecords = feedService.getWithoutDefaultFlatFileRecords(status.getAsOf(), status.getJobId());
+		log.info("IdrFlatFileWithoutDefaultAdjustmentsReportTasklet createWithoutDefaultFlatFileReportBase - get flat file records, size:"+flatfileRecords.size()+" for:"+status.getAsOf()+",jobid="+status.getJobId());
+		
+		if(flatfileRecords==null||flatfileRecords.size()==0){
+			throw new BusinessException(RcastCstOutboundFeedFreval.class,String.format(AppConstants.BIZ_ERROR_NO_PNLDATA,status.getAsOf(),status.getJobId()));
+		}
+		
+		
+		List<RcastCstOutboundFeedFreval> exceptionList = CommonUtility.flaggingExceptionRecords(gocMap,flatfileRecords, AppConstants.DATA_TYPE_IDR_WITHOUT_DEFAULT,AppConstants.DATA_TYPE_IDR_WITHOUT_DEFAULT_EX);
+		
+		//----------------------------3 Filtering/Adjustment------------------------------------------------
+		Iterator<RcastCstOutboundFeedFreval> rowIT = flatfileRecords.iterator();
+		while(rowIT.hasNext()){
+			RcastCstOutboundFeedFreval row = rowIT.next();
+			//update stress level 1
+			if(row.getStressLevel1()!=null&&row.getStressLevel1().equals(AppConstants.BIZ_DATA_SEC_MARKET_OLD)){
+				row.setStressLevel1(AppConstants.BIZ_DATA_SEC_MARKET);
+			}
+			
+			if(row.getGsstCategoryLevel2()!=null){
+				if(row.getGsstCategoryLevel2().equals(AppConstants.BIZ_DATA_AFS)){
+					
+					
+					if(!AppConstants.stressLevel1Keeps.contains(row.getStressLevel1())){
+						log.debug("filter out row:"+row.getLevel12() + "for "+row.getGsstCategoryLevel2());
+						rowIT.remove();
+					}
+					
+				}else if(row.getGsstCategoryLevel2().equals(AppConstants.BIZ_DATA_CVA_HEDGES)){
+					
+					if(!row.getPaaCategory().startsWith("Other Credit^")){
+						log.debug("filter out row:"+row.getLevel12() + "for "+row.getGsstCategoryLevel2());
+						rowIT.remove();
+					}
+					
+				}
+			}
+			
+			//update stress level 1 for RISK_TSRY
+			if(row.getStressLevel1()!=null&&row.getStressLevel1().equals(AppConstants.BIZ_DATA_RISK_TSRY_OLD)){
+				row.setStressLevel1(AppConstants.BIZ_DATA_RISK_TSRY_NEW);
+			}
+		}
+		
+		if(summary!=null){
+			summary.setIdrFlatWithoutDefaultExceptionDataCount(exceptionList.size());
+		}
+		
+		log.info("After filtered, flat file records remained:"+flatfileRecords.size());
+		
+		return flatfileRecords;
+	}
+	
+	public void setCrmrRepository(CrmrRepository crmrRepository) {
+		this.crmrRepository = crmrRepository;
+	}
+	public void setFeedService(RcastCstOutboundFeedFrevalService feedService) {
+		this.feedService = feedService;
+	}
+	public void setMappingService(RatingMappingService mappingService) {
+		this.mappingService = mappingService;
+	}
+	public void setShockService(RatingShockService shockService) {
+		this.shockService = shockService;
+	}
+	
+	
+	
+
+}
