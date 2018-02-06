@@ -1,0 +1,144 @@
+package com.citi.risk.rcast.batch;
+
+import java.io.IOException;
+import java.sql.SQLException;
+import java.util.ArrayList;
+import java.util.Date;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+
+import org.junit.Assert;
+import org.junit.Before;
+import org.junit.Test;
+import org.mockito.Mockito;
+import org.springframework.batch.core.JobExecution;
+import org.springframework.batch.core.StepExecution;
+import org.springframework.batch.core.scope.context.ChunkContext;
+import org.springframework.batch.core.scope.context.StepContext;
+import org.springframework.batch.item.ExecutionContext;
+import org.springframework.beans.factory.annotation.Autowired;
+
+import com.citi.risk.rcast.TestBase;
+import com.citi.risk.rcast.TestConstants;
+import com.citi.risk.rcast.batch.tasklet.IdrFlatFileAdjustmentsReportTasklet;
+import com.citi.risk.rcast.domain.rcast.RcastCstOutboundFeedFreval;
+import com.citi.risk.rcast.domain.rcast.RcastIcgStatus;
+import com.citi.risk.rcast.domain.rcast.Summary;
+import com.citi.risk.rcast.exception.BusinessException;
+import com.citi.risk.rcast.repo.crmr.CrmrRepository;
+import com.citi.risk.rcast.repo.rcastbatch.RcastRepository;
+import com.citi.risk.rcast.service.RcastCstOutboundFeedFrevalService;
+import com.citi.risk.rcast.util.AppConstants;
+import com.citi.risk.rcast.util.CommonUtility;
+
+public class IdrFlatFileAdjustmentsReportTaskletTest extends TestBase{
+	
+	private IdrFlatFileAdjustmentsReportTasklet tasklet = new IdrFlatFileAdjustmentsReportTasklet();
+	private ChunkContext chunkContext ;
+	
+	@Autowired
+	RcastRepository realRepo;
+	
+	@Autowired
+	IdrFlatFileAdjustmentsReportTasklet realTasklet;
+	
+	@Before
+	public void init() throws SQLException{
+		CrmrRepository crmrRepository = Mockito.mock(CrmrRepository.class);
+		RcastCstOutboundFeedFrevalService feedService = Mockito.mock(RcastCstOutboundFeedFrevalService.class);
+		
+		List<RcastCstOutboundFeedFreval> rs = new ArrayList<RcastCstOutboundFeedFreval>();
+		RcastCstOutboundFeedFreval r1 = new RcastCstOutboundFeedFreval();
+		r1.setLevel12("level12");
+		r1.setGoc("134232");
+		r1.setGsstCategoryLevel2("STS");
+		rs.add(r1);
+		
+		//
+		RcastCstOutboundFeedFreval r2 = new RcastCstOutboundFeedFreval();
+		r2.setLevel12("CVA_HEDGES_l12");
+		r2.setGoc("85122");
+		r2.setGsstCategoryLevel2("CVA_Hedges");
+		rs.add(r2);
+		
+		
+		Mockito.when(feedService.getIDRFlatFileRecords(Mockito.any(),Mockito.any())).thenReturn(rs);
+		
+		ExecutionContext executionContext = new ExecutionContext();
+		JobExecution jobExecution = new JobExecution(1212L);
+		jobExecution.setExecutionContext(executionContext);
+		StepExecution stepExecution = new StepExecution("step_a",jobExecution);
+		StepContext stepContext = new StepContext(stepExecution);
+		chunkContext = new ChunkContext(stepContext);
+		
+		tasklet.setCrmrRepository(crmrRepository);
+		tasklet.setFeedService(feedService);
+		
+		RcastIcgStatus sta = new RcastIcgStatus();
+		sta.setAsOf(TestConstants.DATE_CURRENT_DATE_UTIL);
+		sta.setJobId(2222L);
+		chunkContext.getStepContext().getStepExecution().getJobExecution().getExecutionContext().put("status", sta);
+		
+		
+		Map<String,String> gocMap = new HashMap<String,String>();
+		gocMap.put("level12", "8888");
+		chunkContext.getStepContext().getStepExecution().getJobExecution().getExecutionContext().put("gocMap", gocMap);
+		
+	}
+	
+	
+	
+	@Test
+	public void createIdrFlatFileAdjustmentsReportTest() throws IOException, SQLException, BusinessException{
+		
+		RcastIcgStatus status = new RcastIcgStatus();
+		status.setAsOf(CommonUtility.parseDate("03-JAN-2017", AppConstants.DATE_ORACLE_FORMAT));
+		status.setJobId(12617L);
+		
+		Map<String,String> emptyGocMap = new HashMap<String,String>();
+		JobExecution je = new JobExecution(222L);
+		je.setStartTime(new Date());
+		
+		realTasklet.createIdrFlatFileAdjustmentsReport(new Summary(),status, emptyGocMap,je);
+		
+//		List<RcastIdrIntegration> reports = realRepo.getFinalReport(status.getAsOf(), AppConstants.DATA_TYPE_IDR_FLAT);
+		
+//		Assert.assertTrue(reports.size()>0);
+		
+		
+	}
+	
+	@Test
+	public void filterAndEnrichRecordsTest(){
+		List<RcastCstOutboundFeedFreval> rs = new ArrayList<RcastCstOutboundFeedFreval>();
+		RcastCstOutboundFeedFreval r1 = new RcastCstOutboundFeedFreval();
+		r1.setLevel12("level12");
+		r1.setGoc("134232");
+		r1.setGsstCategoryLevel2("STS");
+		rs.add(r1);
+		
+		//
+		RcastCstOutboundFeedFreval r2 = new RcastCstOutboundFeedFreval();
+		r2.setLevel12("CVA_HEDGES_l12");
+		r2.setGoc("85122");
+		r2.setGsstCategoryLevel2("CVA_Hedges");
+		rs.add(r2);
+		
+		tasklet.filterAndEnrichRecords(rs);
+		
+		Assert.assertTrue(rs.size()==1);
+		Assert.assertTrue(rs.iterator().next().getRcastSource().equals("ICG_Market_Risk_Reporting_IDR"));
+		
+	}
+	
+	@Test
+	public void prepareDataTest() throws Exception{
+		
+//		tasklet.execute(null, chunkContext);
+		
+	}
+	
+	
+	
+}
