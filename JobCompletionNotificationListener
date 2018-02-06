@@ -1,0 +1,64 @@
+package com.citi.risk.rcast.batch;
+
+import java.util.Date;
+
+import org.apache.log4j.Logger;
+import org.springframework.batch.core.BatchStatus;
+import org.springframework.batch.core.JobExecution;
+import org.springframework.batch.core.listener.JobExecutionListenerSupport;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Component;
+
+import com.citi.risk.rcast.controller.JobLauncherController;
+import com.citi.risk.rcast.domain.rcast.JobInfo;
+import com.citi.risk.rcast.domain.rcast.RcastIcgStatus;
+import com.citi.risk.rcast.domain.rcast.Summary;
+import com.citi.risk.rcast.mail.IDRMailSender;
+import com.citi.risk.rcast.service.RcastIdrStatusService;
+import com.citi.risk.rcast.util.AppConstants;
+
+@Component
+public class JobCompletionNotificationListener extends JobExecutionListenerSupport {
+
+	private static final Logger log = Logger.getLogger(JobCompletionNotificationListener.class);
+	
+	@Autowired
+	IDRMailSender mailSender;
+	
+	@Autowired
+	RcastIdrStatusService jobService;
+
+
+	@Override
+	public void beforeJob(JobExecution jobExecution) {
+		
+		jobExecution.getExecutionContext().put("job_start_time",new Date());
+		
+	}
+	
+	
+	@Override
+	public void afterJob(JobExecution jobExecution) {
+		long timeTakenInSec = (System.currentTimeMillis()-((Date) jobExecution.getExecutionContext().get("job_start_time")).getTime())/1000;
+		log.info("!!! JOB FINISHED with status["+jobExecution.getStatus()+"] time taken ["+timeTakenInSec+"s]! Time to verify the results");
+
+		RcastIcgStatus sta = (RcastIcgStatus)jobExecution.getExecutionContext().get(AppConstants.BATCH_PARAM_KEY_STATUS);
+		Summary summary = (Summary) jobExecution.getExecutionContext().get(AppConstants.BATCH_PARAM_KEY_SUMMARY_REPORT);
+		JobInfo ji = JobLauncherController.jobMap.get(jobExecution.getId()*-1);
+		
+		ji = JobLauncherController.enrichStatusInfo(ji, jobExecution);
+		if(sta!=null)ji.setAsof(sta.getAsOf());
+		
+		if(ji.getStatus().equals(BatchStatus.COMPLETED)){
+			ji.setSummary(summary);
+		}else{
+			ji.setSummary(new Summary());
+		}
+		
+		jobService.updateJob(ji);
+		
+		mailSender.sendReportResultMail(jobExecution.getJobParameters().getString("soeid"), ji,jobExecution);
+		
+	}
+	
+}
