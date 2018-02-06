@@ -1,0 +1,23 @@
+package com.citi.risk.rcast.service;
+
+import java.util.List;
+
+import com.citi.risk.rcast.domain.rcast.JobInfo;
+import com.citi.risk.rcast.domain.rcast.RcastIdrStatus;
+
+public interface RcastIdrStatusService {
+	public RcastIdrStatus getMaxCompletedJob();
+
+	public Long getNextJobId();
+
+	public void createJob(JobInfo jobInfo);
+
+	public void updateJob(JobInfo ji);
+
+	public List<RcastIdrStatus> getFewJobs(int limit);
+
+	public RcastIdrStatus getJobById(Long jobId);
+	
+
+	
+}
