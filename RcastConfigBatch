@@ -1,0 +1,88 @@
+package com.citi.risk.rcast.config;
+
+import java.sql.SQLException;
+
+import javax.sql.DataSource;
+import javax.validation.constraints.NotNull;
+
+import org.apache.log4j.Logger;
+import org.springframework.boot.context.properties.ConfigurationProperties;
+import org.springframework.boot.web.servlet.FilterRegistrationBean;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.web.cors.CorsConfiguration;
+import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
+import org.springframework.web.filter.CorsFilter;
+
+import com.icg.crypto.IPbkdf2Encrypter;
+import com.icg.crypto.Pbkdf2EncrypterImpl;
+
+import oracle.jdbc.pool.OracleDataSource;
+
+@Configuration
+@ConfigurationProperties(prefix="spring.ds_rcast")
+public class RcastConfigBatch { 
+	private static Logger logger = Logger.getLogger(RcastConfig.class);
+
+    @NotNull
+    private String username;
+
+    @NotNull
+    private String password;
+
+    @NotNull
+    private String url;
+    
+    @NotNull
+    private String driverClassName;
+
+    public void setUsername(String username) {
+        this.username = username;
+    }
+
+    public void setPassword(String password) {
+        this.password = password;
+    }
+
+    public void setUrl(String url) {
+        this.url = url;
+    }
+    	
+	public void setDriverClassName(String driverClassName) {
+		this.driverClassName = driverClassName;
+	}
+	@Bean(name="rcastDataSourceBatch")
+	DataSource rcastDataSource() throws Exception {
+		OracleDataSource dataSource = new OracleDataSource();
+		dataSource.setURL(url);
+		dataSource.setUser(username);
+		IPbkdf2Encrypter IPbkdf2Encrypter = new Pbkdf2EncrypterImpl();
+		String passwordLocal=IPbkdf2Encrypter.decryp(password,"rcast");
+		logger.info("RcastConfigBatch: passwordLocal----------------------"+passwordLocal);
+		dataSource.setPassword(passwordLocal);
+		return dataSource;
+	}
+	
+	@Bean(name = "rcastJdbcTemplateBatch") 
+    public JdbcTemplate jdbcTemplate() throws Exception {
+		JdbcTemplate jt = new JdbcTemplate(rcastDataSource());
+		jt.setFetchSize(6000);
+		return jt;
+    } 
+	
+	@Bean
+	public FilterRegistrationBean corsFilter() {
+		UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
+		CorsConfiguration config = new CorsConfiguration();
+		config.setAllowCredentials(true);
+		config.addAllowedOrigin("*");
+		config.addAllowedHeader("*");
+		config.addAllowedMethod("*");
+		source.registerCorsConfiguration("/**", config);
+		FilterRegistrationBean bean = new FilterRegistrationBean(new CorsFilter(source));
+		bean.setOrder(0);
+		return bean;
+	}
+}
+	
