@@ -1,0 +1,123 @@
+package com.citi.risk.rcast.batch.tasklet;
+
+
+import static com.citi.risk.rcast.util.BatchUtil.GET;
+import static com.citi.risk.rcast.util.BatchUtil.PUT;
+
+import java.io.IOException;
+import java.sql.SQLException;
+import java.util.ArrayList;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
+
+import org.apache.log4j.Logger;
+import org.springframework.batch.core.JobExecution;
+import org.springframework.batch.core.StepContribution;
+import org.springframework.batch.core.scope.context.ChunkContext;
+import org.springframework.batch.core.step.tasklet.Tasklet;
+import org.springframework.batch.repeat.RepeatStatus;
+import org.springframework.beans.factory.annotation.Autowired;
+
+import com.citi.risk.rcast.domain.rcast.RcastCstOutboundFeedFreval;
+import com.citi.risk.rcast.domain.rcast.RcastIcgStatus;
+import com.citi.risk.rcast.domain.rcast.Summary;
+import com.citi.risk.rcast.exception.BusinessException;
+import com.citi.risk.rcast.repo.crmr.CrmrRepository;
+import com.citi.risk.rcast.service.RcastCstOutboundFeedFrevalService;
+import com.citi.risk.rcast.util.AppConstants;
+import com.citi.risk.rcast.util.CommonUtility;
+
+public class IdrFlatFileAdjustmentsReportTasklet implements Tasklet {
+    private static final Logger log = Logger.getLogger(IdrFlatFileAdjustmentsReportTasklet.class);
+    
+    @Autowired
+    CrmrRepository crmrRepository;
+    
+    @Autowired
+    RcastCstOutboundFeedFrevalService feedService;
+    
+
+    
+	@Override
+	public RepeatStatus execute(StepContribution stepContribution, ChunkContext chunkContext) throws Exception {
+		log.info("IdrFlatFileAdjustmentsReportTasklet - execute - started");
+		RcastIcgStatus status = GET(chunkContext,AppConstants.BATCH_PARAM_KEY_STATUS,RcastIcgStatus.class);
+		Map<String, String> gocMap = GET(chunkContext,AppConstants.BATCH_PARAM_KEY_GOCMAP,Map.class);
+		Summary summary = GET(chunkContext,AppConstants.BATCH_PARAM_KEY_SUMMARY_REPORT,Summary.class);
+		List<RcastCstOutboundFeedFreval> finalReport = GET(chunkContext,AppConstants.BATCH_PARAM_KEY_FINAL_REPORT,List.class);
+		
+		
+		if(status!=null&&gocMap!=null){
+			finalReport.addAll(createIdrFlatFileAdjustmentsReport(summary, status, gocMap,chunkContext.getStepContext().getStepExecution().getJobExecution()));
+		}
+		
+		PUT(chunkContext,AppConstants.BATCH_PARAM_KEY_SUMMARY_REPORT,summary);
+		PUT(chunkContext,AppConstants.BATCH_PARAM_KEY_FINAL_REPORT,finalReport);
+		summary=null;
+		finalReport =null;
+		log.info("IdrFlatFileAdjustmentsReportTasklet - execute - completed");
+		return RepeatStatus.FINISHED;
+	}
+
+	
+	public List<RcastCstOutboundFeedFreval> createIdrFlatFileAdjustmentsReport(Summary summary, RcastIcgStatus status, Map<String, String> gocMap, JobExecution je) throws IOException, SQLException, BusinessException {
+		log.info("IdrFlatFileAdjustmentsReportTasklet - createIdrFlatFileAdjustmentsReport - started");
+		List<RcastCstOutboundFeedFreval> finalRecords = new ArrayList<RcastCstOutboundFeedFreval>();
+		
+		List<RcastCstOutboundFeedFreval> records = feedService.getIDRFlatFileRecords(status.getAsOf(), status.getJobId());
+		
+		log.info("IdrFlatFileAdjustmentsReportTasklet - createIdrFlatFileAdjustmentsReport - Total flat file Records from DB: "+records.size()+" for : "+status.getAsOf());
+		
+		if(records==null||records.size()==0){
+			throw new BusinessException(RcastCstOutboundFeedFreval.class,String.format(AppConstants.BIZ_ERROR_NO_PNLDATA,status.getAsOf(),status.getJobId()));
+		}
+		
+		
+		List<RcastCstOutboundFeedFreval> exceptionList = CommonUtility.flaggingExceptionRecords(gocMap,records,AppConstants.DATA_TYPE_IDR_FLAT,AppConstants.DATA_TYPE_IDR_FLAT_EX);
+		
+		filterAndEnrichRecords(records);
+		
+		if(summary!=null){
+			summary.setIdrFlatExceptionDataCount(exceptionList.size());
+			summary.setIdrFlatGoodDataCount(records.size()-exceptionList.size());
+		}
+		
+		finalRecords.addAll(records);
+		records =null;
+		CommonUtility.enrichFinalReportsCommonInfo(finalRecords,je);
+		
+		log.info("IdrFlatFileAdjustmentsReportTasklet - createIdrFlatFileAdjustmentsReport - completed");
+		return finalRecords;
+		
+	}
+
+
+	public void filterAndEnrichRecords(List<RcastCstOutboundFeedFreval> records) {
+		Iterator<RcastCstOutboundFeedFreval> rowIT = records.iterator();
+		
+		while(rowIT.hasNext()){
+			RcastCstOutboundFeedFreval row = rowIT.next();
+			
+			if(row.getGsstCategoryLevel2()!=null && row.getGsstCategoryLevel2().equals(AppConstants.BIZ_DATA_CVA_HEDGES)){
+				log.debug("filter row:"+row.getLevel12());
+				rowIT.remove();
+			}
+			
+			row.setRcastSource(AppConstants.BIZ_DATA_RCAST_SOURCE_IDR);
+			
+		}
+	}
+
+	public void setCrmrRepository(CrmrRepository crmrRepository) {
+		this.crmrRepository = crmrRepository;
+	}
+
+
+	public void setFeedService(RcastCstOutboundFeedFrevalService feedService) {
+		this.feedService = feedService;
+	}
+
+	
+
+}
