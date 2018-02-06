@@ -1,0 +1,85 @@
+package com.citi.risk.rcast.service;
+
+import java.util.Date;
+import java.util.List;
+
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+import com.citi.risk.rcast.domain.rcast.JobInfo;
+import com.citi.risk.rcast.domain.rcast.RcastIdrStatus;
+import com.citi.risk.rcast.domain.rcast.Summary;
+import com.citi.risk.rcast.repo.rcast.RcastIdrStatusRepository;
+import com.citi.risk.rcast.util.AppConstants;
+
+@Service
+@Transactional("rcastTransactionManager")
+public class RcastIdrStatusServiceImpl implements RcastIdrStatusService{
+
+	@Autowired
+	RcastIdrStatusRepository repo;
+	
+	@Override
+	public RcastIdrStatus getMaxCompletedJob() {
+		return repo.findMaxCompletedJob();
+	}
+
+	@Override
+	public Long getNextJobId() {
+		Long max = repo.findMaxJobId();
+		return max==null?1:max+1;
+	}
+
+	@Override
+	public void createJob(JobInfo jobInfo) {
+		RcastIdrStatus sta = convert(jobInfo);
+		repo.save(sta);
+	}
+
+
+	@Override
+	public void updateJob(JobInfo ji) {
+		RcastIdrStatus sta = convert(ji);
+		RcastIdrStatus sdb = repo.findByJobId(sta.getJobId());
+		sta.setRecordId(sdb.getRecordId());
+		repo.save(sta);
+	}
+	
+	
+	
+	
+	
+	
+	private RcastIdrStatus convert(JobInfo jobInfo) {
+		RcastIdrStatus sta = new RcastIdrStatus();
+		Summary sum = jobInfo.getSummary()==null?new Summary():jobInfo.getSummary();
+		sta.setJobId(jobInfo.getJobId());
+		sta.setJobname(jobInfo.getJobname());
+		sta.setStatus(jobInfo.getStatus().name());
+		sta.setAsof(jobInfo.getAsof());
+		sta.setStartTime(jobInfo.getStartTime());
+		sta.setEndTime(jobInfo.getEndTime());
+		sta.setTimeTakenInSeconds(jobInfo.getTimeTakenInSeconds());
+		sta.setIdrFlatExceptionDataCount(sum.getIdrFlatExceptionDataCount());
+		sta.setIdrFlatGoodDataCount(sum.getIdrFlatGoodDataCount());
+		sta.setIdrFlatWithoutDefaultExceptionDataCount(sum.getIdrFlatWithoutDefaultExceptionDataCount());
+		sta.setIdrFlatWithoutDefaultGoodDataCount(sum.getIdrFlatWithoutDefaultGoodDataCount());
+		sta.setMessage(jobInfo.getExceptionMessages());
+		sta.setLastUpdated(jobInfo.getLastUpdated());
+		sta.setLastUpdatedBy(jobInfo.getLastUpdatedBy());
+		return sta;
+	}
+
+	@Override
+	public List<RcastIdrStatus> getFewJobs(int limit) {
+		return repo.findFewInDescOrder(limit);
+	}
+
+	@Override
+	public RcastIdrStatus getJobById(Long jobId) {
+		
+		return repo.findByJobId(jobId);
+	}
+
+}
