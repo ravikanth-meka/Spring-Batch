@@ -1,0 +1,18 @@
+package com.citi.risk.rcast.util;
+
+import org.springframework.batch.core.scope.context.ChunkContext;
+
+public class BatchUtil {
+	
+	public static <T> void PUT(ChunkContext context,String key, T obj){
+		context.getStepContext().getStepExecution().getJobExecution().getExecutionContext().put(key, obj);
+	}
+	
+	public static <T> T GET(ChunkContext context,String key, Class T){
+		return (T)context.getStepContext().getStepExecution().getJobExecution().getExecutionContext().get(key);
+	}
+	
+	public static <T> T REMOVE(ChunkContext context,String key){
+		return (T)context.getStepContext().getStepExecution().getJobExecution().getExecutionContext().remove(key);
+	}
+}
