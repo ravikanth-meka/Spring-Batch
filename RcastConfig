@@ -1,0 +1,96 @@
+package com.citi.risk.rcast.config;
+
+import java.sql.SQLException;
+
+import javax.sql.DataSource;
+import javax.validation.constraints.NotNull;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.boot.context.properties.ConfigurationProperties;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.context.annotation.Primary;
+import org.springframework.data.jpa.repository.config.EnableJpaRepositories;
+import org.springframework.orm.jpa.JpaTransactionManager;
+import org.springframework.orm.jpa.LocalContainerEntityManagerFactoryBean;
+import org.springframework.orm.jpa.vendor.Database;
+import org.springframework.orm.jpa.vendor.HibernateJpaVendorAdapter;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.annotation.EnableTransactionManagement;
+
+import com.icg.crypto.IPbkdf2Encrypter;
+import com.icg.crypto.Pbkdf2EncrypterImpl;
+
+import oracle.jdbc.pool.OracleDataSource;
+
+@Configuration
+@ConfigurationProperties(prefix="spring.ds_rcast")
+@EnableJpaRepositories(basePackages = "com.citi.risk.rcast.repo.rcast", entityManagerFactoryRef = "rcastEntityManagerFactory", transactionManagerRef = "rcastTransactionManager")
+@EnableTransactionManagement
+public class RcastConfig { 
+
+	private static final String[] PACKAGES_TO_SCAN = {"com.citi.risk.rcast.domain.rcast"};
+	private static Logger logger = LoggerFactory.getLogger(RcastConfig.class);
+
+    @NotNull
+    private String username;
+
+    @NotNull
+    private String password;
+
+    @NotNull
+    private String url;
+
+    public void setUsername(String username) {
+        this.username = username;
+    }
+
+    public void setPassword(String password) {
+        this.password = password;
+    }
+
+    public void setUrl(String url) {
+        this.url = url;
+    }
+    
+    @Primary
+	@Bean(name = "rcastTransactionManager")
+	PlatformTransactionManager  rcastTransactionManager() throws Exception {
+		return new JpaTransactionManager(rcastEntityManagerFactory().getObject());
+	}
+   
+    @Primary
+	@Bean(name = "rcastEntityManagerFactory")
+	LocalContainerEntityManagerFactoryBean rcastEntityManagerFactory() throws Exception {
+		LocalContainerEntityManagerFactoryBean factoryBean = new LocalContainerEntityManagerFactoryBean();
+		factoryBean.setDataSource(rcastDataSource());
+		factoryBean.setJpaVendorAdapter(vendorAdaptor());
+		factoryBean.setPersistenceUnitName("rcastPersistenceUnit");
+		factoryBean.setPackagesToScan(PACKAGES_TO_SCAN);
+		return factoryBean;
+	}
+	
+	private HibernateJpaVendorAdapter vendorAdaptor() {
+		HibernateJpaVendorAdapter vendorAdapter = new HibernateJpaVendorAdapter();
+		vendorAdapter.setShowSql(false);
+		vendorAdapter.setGenerateDdl(false);
+		vendorAdapter.setDatabase(Database.ORACLE);
+		vendorAdapter.setDatabasePlatform("org.hibernate.dialect.Oracle10gDialect");
+		return vendorAdapter;
+	}
+	
+	@Primary
+	@Bean(name = "rcastDataSource")
+	DataSource rcastDataSource() throws Exception {
+		OracleDataSource dataSource = new OracleDataSource();
+		dataSource.setURL(url);
+		dataSource.setUser(username);
+		IPbkdf2Encrypter IPbkdf2Encrypter = new Pbkdf2EncrypterImpl();
+		String passwordLocal=IPbkdf2Encrypter.decryp(password,"rcast");
+		logger.info("RcastConfig: passwordLocal----------------------"+passwordLocal); 
+		dataSource.setPassword(passwordLocal);
+		return dataSource;
+	}
+}
+	
