@@ -1,0 +1,35 @@
+package com.citi.risk.rcast.batch.tasklet;
+
+
+import static com.citi.risk.rcast.util.BatchUtil.GET;
+
+import java.util.List;
+
+import org.apache.log4j.Logger;
+import org.springframework.batch.core.StepContribution;
+import org.springframework.batch.core.scope.context.ChunkContext;
+import org.springframework.batch.core.step.tasklet.Tasklet;
+import org.springframework.batch.repeat.RepeatStatus;
+import org.springframework.beans.factory.annotation.Autowired;
+
+import com.citi.risk.rcast.repo.rcastbatch.RcastRepository;
+import com.citi.risk.rcast.util.AppConstants;
+
+public class StoreIdrFinalReportTasklet implements Tasklet {
+
+	private static final Logger log = Logger.getLogger(StoreIdrFinalReportTasklet.class);
+    
+    @Autowired
+    RcastRepository rcastRepository;
+
+	@Override
+	public RepeatStatus execute(StepContribution stepContribution, ChunkContext chunkContext) throws Exception {
+		rcastRepository.batchIntertReport(GET(chunkContext,AppConstants.BATCH_PARAM_KEY_FINAL_REPORT,List.class));
+		return RepeatStatus.FINISHED;
+	}
+
+	public void setRcastRepository(RcastRepository rcastRepository) {
+		this.rcastRepository = rcastRepository;
+	}
+
+}
