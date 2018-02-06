@@ -1,0 +1,141 @@
+package com.citi.risk.rcast.batch;
+
+import javax.sql.DataSource;
+
+import org.apache.log4j.Logger;
+import org.springframework.batch.core.Job;
+import org.springframework.batch.core.Step;
+import org.springframework.batch.core.configuration.annotation.DefaultBatchConfigurer;
+import org.springframework.batch.core.configuration.annotation.EnableBatchProcessing;
+import org.springframework.batch.core.configuration.annotation.JobBuilderFactory;
+import org.springframework.batch.core.configuration.annotation.StepBuilderFactory;
+import org.springframework.batch.core.launch.JobLauncher;
+import org.springframework.batch.core.launch.support.RunIdIncrementer;
+import org.springframework.batch.core.launch.support.SimpleJobLauncher;
+import org.springframework.batch.core.repository.JobRepository;
+import org.springframework.batch.core.step.tasklet.Tasklet;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.ComponentScan;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.core.task.SimpleAsyncTaskExecutor;
+import org.springframework.stereotype.Component;
+
+import com.citi.risk.rcast.batch.tasklet.ClearInMemoDataTasklet;
+import com.citi.risk.rcast.batch.tasklet.IdrFlatFileAdjustmentsReportTasklet;
+import com.citi.risk.rcast.batch.tasklet.IdrFlatFileWithoutDefaultAdjustmentsReportTasklet;
+import com.citi.risk.rcast.batch.tasklet.IdrIntegrationPreparationTasklet;
+import com.citi.risk.rcast.batch.tasklet.SetMonthlyFlagTasklet;
+import com.citi.risk.rcast.batch.tasklet.StoreIdrFinalReportTasklet;
+
+@Configuration
+@EnableBatchProcessing
+@ComponentScan(basePackageClasses = EmptyBatchConfigurer.class)
+public class BatchConfig {
+	private static Logger logger = Logger.getLogger(BatchConfig.class);
+    @Autowired
+    public JobBuilderFactory jobBuilderFactory;
+
+    @Autowired
+    public StepBuilderFactory stepBuilderFactory;
+
+    @Autowired
+    public JobRepository jobRepository;
+    
+    
+    @Bean
+    public JobLauncher asyncJobLauncher() {
+        SimpleJobLauncher jobLauncher = new SimpleJobLauncher();
+        jobLauncher.setJobRepository(jobRepository);
+        jobLauncher.setTaskExecutor(new SimpleAsyncTaskExecutor());
+        return jobLauncher;
+    }
+    
+
+    @Bean("idrAutomationJob")
+    public Job sampleJob(JobCompletionNotificationListener listener) {
+    	return jobBuilderFactory.get("idrAutomationJob")
+                .incrementer(new RunIdIncrementer())
+                .listener(listener)
+                .flow(step_prepare()).next(step_IdrAdjustment()).next(step_IdrWithoutAdjustment()).next(step_storeJobInfo()).next(step_setMonthlyFlag()).next(step_clearContext())
+                .end()
+                .build();
+    }
+    
+    
+    @Bean
+    public Step step_prepare() {
+        return stepBuilderFactory.get("step_a_prepare_cob_n_gocMap").tasklet(idrIntegrationPreparationTasklet())
+                .build();
+    }
+    
+    @Bean
+    public Step step_IdrAdjustment() {
+        return stepBuilderFactory.get("step_b_generate_idr_flat_records").tasklet(idrFlatFileAdjustmentsReportTasklet())
+                .build();
+    }
+    
+    @Bean
+    public Step step_IdrWithoutAdjustment() {
+        return stepBuilderFactory.get("step_c_idr_generate_flat_file_without_adjustment_records").tasklet(idrFlatFileWithoutDefaultAdjustmentsReportTasklet())
+                .build();
+    }
+    
+    @Bean
+    public Step step_storeJobInfo() {
+        return stepBuilderFactory.get("step_d_save_all_records_to_database").tasklet(storeJobInfoTasklet())
+                .build();
+    }
+    
+    @Bean
+    public Step step_setMonthlyFlag() {
+        return stepBuilderFactory.get("step_e_set_monthly_flag").tasklet(setMonthlyFlag())
+                .build();
+    }
+    
+    @Bean
+    public Step step_clearContext() {
+        return stepBuilderFactory.get("step_f_clear_context").tasklet(clearContextTask())
+                .build();
+    }
+    
+    @Bean
+    public Tasklet clearContextTask() {
+		return new ClearInMemoDataTasklet();
+	}
+
+    
+    @Bean
+    public Tasklet storeJobInfoTasklet() {
+		return new StoreIdrFinalReportTasklet();
+	}
+    
+    @Bean
+    public Tasklet setMonthlyFlag() {
+		return new SetMonthlyFlagTasklet();
+	}
+
+
+	@Bean
+    public IdrIntegrationPreparationTasklet idrIntegrationPreparationTasklet(){
+    	return new IdrIntegrationPreparationTasklet(); 
+    }
+    
+    @Bean
+    public IdrFlatFileAdjustmentsReportTasklet idrFlatFileAdjustmentsReportTasklet(){
+    	return new IdrFlatFileAdjustmentsReportTasklet(); 
+    }
+    
+    @Bean
+    public IdrFlatFileWithoutDefaultAdjustmentsReportTasklet idrFlatFileWithoutDefaultAdjustmentsReportTasklet(){
+    	return new IdrFlatFileWithoutDefaultAdjustmentsReportTasklet(); 
+    }
+    
+}
+
+@Component
+class EmptyBatchConfigurer extends DefaultBatchConfigurer {
+	@Override
+	public void setDataSource(DataSource dataSource) {
+	}
+}
