@@ -1,0 +1,196 @@
+package com.citi.risk.rcast.controller;
+
+import java.util.ArrayList;
+import java.util.Date;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.TreeMap;
+
+import org.apache.commons.lang.StringUtils;
+import org.apache.log4j.Logger;
+import org.springframework.batch.core.BatchStatus;
+import org.springframework.batch.core.Job;
+import org.springframework.batch.core.JobExecution;
+import org.springframework.batch.core.JobParameter;
+import org.springframework.batch.core.JobParameters;
+import org.springframework.batch.core.JobParametersInvalidException;
+import org.springframework.batch.core.launch.JobLauncher;
+import org.springframework.batch.core.repository.JobExecutionAlreadyRunningException;
+import org.springframework.batch.core.repository.JobInstanceAlreadyCompleteException;
+import org.springframework.batch.core.repository.JobRepository;
+import org.springframework.batch.core.repository.JobRestartException;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.CrossOrigin;
+import org.springframework.web.bind.annotation.RequestHeader;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.ResponseBody;
+import org.springframework.web.bind.annotation.RestController;
+
+import com.citi.risk.rcast.domain.rcast.JobInfo;
+import com.citi.risk.rcast.domain.rcast.RcastIdrStatus;
+import com.citi.risk.rcast.domain.rcast.Summary;
+import com.citi.risk.rcast.domain.vo.JobInfoVO;
+import com.citi.risk.rcast.exception.BusinessException;
+import com.citi.risk.rcast.exception.ErrorException;
+import com.citi.risk.rcast.service.RcastIdrStatusService;
+import com.citi.risk.rcast.util.AppConstants;
+import com.citi.risk.rcast.util.CommonUtility;
+
+
+@CrossOrigin(maxAge = 3600)
+@RestController
+//@RequestMapping("/idr")
+public class JobLauncherController {
+
+    private static Logger logger = Logger.getLogger(JobLauncherController.class);
+
+    public static Map<Long,JobInfo> jobMap = new TreeMap<Long,JobInfo>();
+    
+    @Autowired
+    @Qualifier("asyncJobLauncher")
+    private JobLauncher jobLauncher;
+    
+    @Autowired
+    @Qualifier("idrAutomationJob")
+    private Job idrAutomationJob;
+    
+    @Autowired
+    private JobRepository jobRepository;
+    
+	@Autowired
+	RcastIdrStatusService jobService;
+    
+    @RequestMapping("/getLatestJobStatus")
+	@ResponseBody
+	public JobInfoVO getLatestJobStatus() {
+    	JobInfoVO jvo = new JobInfoVO();
+		JobInfo lj = getLatest(jobMap);
+    	if(lj!=null){
+    		RcastIdrStatus job = jobService.getJobById(lj.getJobId());
+    		if(job!=null){
+    			jvo = new JobInfoVO(job.getJobId(),job.getJobname(),job.getStatus(),job.getMessage(),job.getStartTime(),job.getEndTime(),job.getTimeTakenInSeconds(),job.getAsof()==null?null:CommonUtility.formatDate(job.getAsof(), AppConstants.AS_OF_FORMAT),job.getIdrFlatWithoutDefaultGoodDataCount(),job.getIdrFlatWithoutDefaultExceptionDataCount(),job.getIdrFlatGoodDataCount(),job.getIdrFlatExceptionDataCount(),"");
+    		}else{
+    			logger.error("In Memory job doesn't exist in DB, DB table may have been manipulated, or you're running incompleted test cases!");
+    		}
+    	}else{
+    		jvo.setMessage(AppConstants.MESSAGE_NO_JOB_FOUND);
+    	}
+    	return jvo;
+	
+	}
+    
+    @RequestMapping("/getFewJobs")
+   	@ResponseBody
+   	public List<JobInfoVO> getFewJobs() {
+    	List<JobInfoVO> jobVos = new ArrayList<JobInfoVO>();
+    	int limit = 10;
+    	List<RcastIdrStatus> jobs = jobService.getFewJobs(limit);
+    	
+    	for(RcastIdrStatus job:jobs){
+    		JobInfoVO jvo = new JobInfoVO(job.getJobId(),job.getJobname(),job.getStatus(),job.getMessage(),job.getStartTime(),job.getEndTime(),job.getTimeTakenInSeconds(),job.getAsof()==null?null:CommonUtility.formatDate(job.getAsof(), AppConstants.AS_OF_FORMAT),job.getIdrFlatWithoutDefaultGoodDataCount(),job.getIdrFlatWithoutDefaultExceptionDataCount(),job.getIdrFlatGoodDataCount(),job.getIdrFlatExceptionDataCount(),"");
+    		jobVos.add(jvo);
+    	}
+    	
+    	return jobVos;
+    }
+    
+    @RequestMapping("/getJobByJobId")
+   	@ResponseBody
+   	public JobInfoVO getJobByJobId(@RequestParam(value="jobId" ) Long jobId) throws ErrorException {
+    	if(jobId==null){
+			throw new ErrorException(AppConstants.ERROR_JOBID_MISSING);
+		}
+    	
+    	RcastIdrStatus job = jobService.getJobById(jobId);
+    	JobInfoVO jvo = new JobInfoVO(job.getJobId(),job.getJobname(),job.getStatus(),job.getMessage(),job.getStartTime(),job.getEndTime(),job.getTimeTakenInSeconds(),job.getAsof()==null?null:CommonUtility.formatDate(job.getAsof(), AppConstants.AS_OF_FORMAT),job.getIdrFlatWithoutDefaultGoodDataCount(),job.getIdrFlatWithoutDefaultExceptionDataCount(),job.getIdrFlatGoodDataCount(),job.getIdrFlatExceptionDataCount(),"");
+    	return jvo;
+    }
+    
+
+    
+	@RequestMapping(value = "/idrAutomation")
+   public ResponseEntity<Void>  idrAutomation( @RequestHeader(value="soeid" , required = false) String soeid,@RequestParam("asof") String asof ) throws JobExecutionAlreadyRunningException, JobRestartException, JobInstanceAlreadyCompleteException, JobParametersInvalidException, ErrorException, BusinessException{
+		if(getLatestJobStatus().getStatus()!=null && getLatestJobStatus().getStatus().equals(BatchStatus.STARTED.name())){
+			throw new ErrorException(AppConstants.MESSAGE_NO_JOB_ALREADY_RUNNING);
+		}
+		
+		if(StringUtils.isEmpty(soeid)||StringUtils.isEmpty(asof)){
+			throw new ErrorException(AppConstants.ERROR_MISSING_SOEID_ASOF);
+		}
+		try{
+			CommonUtility.parseDate(asof, AppConstants.DATE_ORACLE_FORMAT);
+		}catch(Exception e){
+			throw new ErrorException(AppConstants.ERROR_WRONG_DATE_FORMAT);
+		}
+		
+		//start the job
+    	Map<String,JobParameter> pps = new HashMap<String,JobParameter>();
+    	pps.put("currentTime",new JobParameter(System.currentTimeMillis()));
+    	pps.put("soeid",new JobParameter(soeid));
+    	pps.put("asof", new JobParameter(asof));
+    	JobParameters jp = new JobParameters(pps);
+    	//create DB job record
+    	
+    	JobInfo jobInfo = new JobInfo();
+    	jobInfo.setJobId(jobService.getNextJobId());
+    	jobInfo.setJobname(idrAutomationJob.getName());
+    	jobInfo.setStatus(BatchStatus.STARTED);
+    	jobInfo.setJobParameters(jp);
+    	jobInfo.setSummary(new Summary());
+    	jobInfo.setLastUpdatedBy(soeid);
+    	jobInfo.setLastUpdated(new Date());
+    	
+    	jobService.createJob(jobInfo);
+    	
+    	JobExecution je = jobLauncher.run(idrAutomationJob,jp);
+    	jobMap.put(je.getId()*-1, jobInfo);
+        return new ResponseEntity<Void>(HttpStatus.OK);
+    }
+    
+	private JobInfo getLatest(Map<Long, JobInfo> jobMap) {
+	    	if(jobMap!=null&&jobMap.size()>0){
+	    		return jobMap.entrySet().iterator().next().getValue();
+	    	}
+	    		
+	    	return null;
+	}
+	public static JobInfo enrichStatusInfo(JobInfo latestJobExecution, JobExecution je ) {
+			
+			StringBuilder sb = new StringBuilder();
+			for(Throwable thr:je.getAllFailureExceptions()){
+				sb.append(thr.getMessage()).append("\n");
+			}
+			
+			latestJobExecution.setStartTime(je.getStartTime());
+			latestJobExecution.setEndTime(je.getEndTime());
+			latestJobExecution.setLastUpdated(new Date());
+			
+			if(latestJobExecution.getEndTime()!=null){
+				latestJobExecution.setTimeTakenInSeconds((latestJobExecution.getEndTime().getTime()-latestJobExecution.getStartTime().getTime())/1000);
+			}else{
+				latestJobExecution.setTimeTakenInSeconds((new Date().getTime()-latestJobExecution.getStartTime().getTime())/1000);
+			}
+			
+			
+			
+			latestJobExecution.setStatus(je.getStatus());
+			latestJobExecution.setExceptionMessages(sb.toString());
+			return latestJobExecution;
+	}
+
+
+	public JobRepository getJobRepository() {
+		return jobRepository;
+	}
+
+	public void setJobRepository(JobRepository jobRepository) {
+		this.jobRepository = jobRepository;
+	}
+	
+	
+}
