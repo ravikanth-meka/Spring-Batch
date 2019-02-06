@@ -1,0 +1,391 @@
+
+@Service
+public class PopulationConsistencyServiceImpl implements PopulationConsistencyService {
+
+	private static Logger logger = LoggerFactory.getLogger(PopulationConsistencyServiceImpl.class);
+	private AtomicBoolean isFetchingData = new AtomicBoolean(false);
+	
+	@Autowired
+	PopulationReportRepository populationReportRepository;
+
+	@Autowired
+	PopulationSmryRepository populationSmryRepository;
+	
+	@Autowired
+	CstIcgStatusRepository cstIcgStatusRepository;
+
+	
+	@Value("${population.consistency.feedingSystems}")
+	private String feedingSystems;
+	
+	@Value("${population.consistency.noOfPastCobs}")
+	private String noOfPastCobs;
+
+	@Value("${population.consistency.feedType}")
+	private String feedType;
+
+	
+	@Autowired
+	private TaskExecutor executor;
+
+	/**
+	 *  Initializes immediately after bean creation.
+	 *  Generates history data if any date data is missing as per the icg status job id.
+	 */
+	@PostConstruct
+	public void init() {
+		try {
+			generateHistoryData();
+		} catch (Exception e) {
+			e.printStackTrace();
+			logger.error("Population consistency Data Fetch failed...");
+		}
+	}
+	
+	@Override
+	public List<PopulationConsistency> getPopulationConsistenciesForCob(Date asOf) {
+		return getPopulationConsistencies(asOf, feedingSystems);
+	}
+
+	/**
+	 *  Fetches data for each feed system in parallel for the Cob provided.
+	 *  Wait for completion for all the feed threads. 
+	 *  return data list for all the feeds. 
+	 */
+	@Override
+	public List<PopulationConsistency> getPopulationConsistencies(Date asOf, String feedingSystems) {
+		List<PopulationConsistency> populationConsistencyForScenarioList = new ArrayList<>();
+		
+		logger.info("Started processing fetching Population consistency data: " + new java.util.Date());
+		List<String> feedSystemList = Arrays.asList(feedingSystems.split(","));
+		
+		Thread.UncaughtExceptionHandler h = new Thread.UncaughtExceptionHandler() {
+		    public void uncaughtException(Thread th, Throwable ex) {
+		        System.out.println("Uncaught exception: " + ex);
+		    }
+		};
+
+		CountDownLatch latch = new CountDownLatch(feedSystemList.size());
+		
+		//logger.info("feedSystemList.size()"+feedSystemList.size());
+		
+		
+		//logger.info("latch  count before "+latch.getCount());
+		
+		feedSystemList.forEach(feedSystem -> {
+			Runnable worker = new WorkerThread(asOf, feedSystem.trim(), feedType.trim(), populationConsistencyForScenarioList,latch);
+			executor.execute(worker);
+		});
+		
+		//logger.info("latch  count after 2"+latch.getCount());
+		
+		try {
+			//logger.info("before latch  wait"+latch.getCount());
+			  latch.await();
+			  //logger.info("after latch  wait"+latch.getCount());
+		} catch (InterruptedException e) {
+			e.printStackTrace();
+		}
+		
+		
+		
+		
+		
+		
+		
+		List<Future<List<PopulationConsistency>>> populationConsistencyForScenarioFutureList = new ArrayList<>();
+
+		feedSystemList.forEach(feedSystem -> {
+			WorkerCallableThread worker = new WorkerCallableThread(asOf, feedSystem.trim(), feedType.trim());
+			Future<List<PopulationConsistency>> result = ((ThreadPoolTaskExecutor) executor).submit(worker);
+			populationConsistencyForScenarioFutureList.add(result);
+		});
+		
+		while (((ThreadPoolTaskExecutor) executor).getActiveCount() != 0) {
+			try {
+				Thread.sleep(1000);
+			} catch (InterruptedException e) {
+				// TODOAuto-generated catch block
+				e.printStackTrace();
+			}
+		}
+		// ((ThreadPoolTaskExecutor)executor).shutdown();
+
+		for (Future<List<PopulationConsistency>> fut : populationConsistencyForScenarioFutureList) {
+			try {
+				// print the return value of Future, notice the output delay in
+				// console because Future.get() waits for task to get completed
+				populationConsistencyForScenarioList.addAll(fut.get());
+			} catch (InterruptedException | ExecutionException e) {
+				e.printStackTrace();
+			}
+		}
+
+		
+
+		logger.info("Finished processing fetching Population consistency data: " + new java.util.Date());
+		return populationConsistencyForScenarioList;
+	}
+
+	/**
+	 * Fetches History data and loads data into population consistency summary table. 
+	 */
+	public CstPopulationSmryResp retrievePopulationSummary() {
+		CstPopulationSmryResp cstPopulationSmryResp = new CstPopulationSmryResp();
+
+		// Only one thread is allowed to go inside - Default for isFetchingData is FALSE
+		if (!isFetchingData.get())
+		{
+			//set isFetchingData to TRUE
+			isFetchingData.set(true);
+			try {
+				generateHistoryData();
+			} catch (Exception e) {
+				cstPopulationSmryResp.setStatusMsg("Technical Difficulties in processing the Data");
+			}
+			//reset isFetchingData to FALSE
+			isFetchingData.set(false);
+		}
+		
+		// if isFetchingData is TRUE, then set message as "background process in progress"
+		if (isFetchingData.get())
+		{
+			cstPopulationSmryResp.setStatusMsg("Background Data processing is in progress...");
+		}
+		else
+		{
+			// if isFetchingData is FALSE, that implies no background process is running. So set status as success.
+			cstPopulationSmryResp.setStatusMsg("Success");
+		}
+		
+		//Add what ever data is available in population summary list.
+		List<CstPopulationSmry> existingData = new ArrayList<>();
+		List<?> latestCobHistory = cstIcgStatusRepository.findAsOfJobIdHistory(noOfPastCobs);
+		latestCobHistory.forEach(hist -> {
+			String asOfDate= (((Object[]) hist)[0]).toString();
+			Date asOfDbFmt;
+			try {
+				asOfDbFmt = new Date(AppConstants.SQL_DATE_FMT.parse(asOfDate).getTime());
+				existingData.addAll(retrieveDataForCob(asOfDbFmt));
+			} catch (Exception e1) {
+				e1.printStackTrace();
+			}
+		});
+		cstPopulationSmryResp.setCstPopulationSmryList(existingData);
+
+		return cstPopulationSmryResp;
+	}
+
+	/**
+	 *  Initializing or history call to fetch the history data 
+	 */
+	public void generateHistoryData() throws Exception {
+		
+		//Fetch the jobid's from Icg Status table.
+		List<?> latestCobHistory = cstIcgStatusRepository.findAsOfJobIdHistory(noOfPastCobs);
+		//Iterate through each jobid
+			latestCobHistory.forEach(hist-> {
+				String asOfDate= (((Object[]) hist)[0]).toString();
+				Date asOfDbFmt;
+				try {
+					asOfDbFmt = new Date(AppConstants.SQL_DATE_FMT.parse(asOfDate).getTime());
+					Integer icgStatusJobId = new Integer((((Object[]) hist)[1]).toString());
+					Integer popConSmyJobId = populationSmryRepository.findJobIdCurrentCobDate(asOfDbFmt);
+					//Validate jobid with population consistency job id for that specific COB
+					if(icgStatusJobId!=null && (icgStatusJobId.intValue() != (popConSmyJobId!=null ? popConSmyJobId.intValue():0)))
+					{
+							fetchAndUpdatePopConsistencySummaryDB(asOfDbFmt);
+					}
+				} catch (Exception e1) {
+					e1.printStackTrace();
+					throw new RuntimeException(e1);
+				}
+			});
+	}
+	
+	@Cacheable({"populationConsistencyCache"})
+	public List<CstPopulationSmry> retrieveDataForCob(Date as_of_date) throws Exception {
+		logger.info("Retrieving data for cob " + as_of_date );
+		Date infDate =  new java.sql.Date((new GregorianCalendar(9999, 11, 31).getTime()).getTime());
+		List<CstPopulationSmry> existingData = populationSmryRepository.findByAsOfGTModifiedTime(as_of_date,infDate);
+		/*List<CstPopulationSmry> liqAdjFilteredData = new ArrayList<>();	
+		
+		existingData.forEach(
+				 popSum -> {
+					Date asOfDate= popSum.getAsOf();
+					Date secondThursday;
+					String isSecondThur = "N";
+					try {
+						secondThursday = new Date(DateUtil.getSecondThursday(asOfDate).getTime());
+						  
+						if (!asOfDate.equals(secondThursday) ){
+							isSecondThur = "N";
+							if (popSum.getScenarioName()!=null && !popSum.getScenarioName().toLowerCase().contains("liqadj"))
+								liqAdjFilteredData.add(popSum);	
+						}
+						else
+						{
+							isSecondThur = "Y";
+							//liqAdjFilteredData.add(popSum);
+						}
+						popSum.setIsSecondThursday(isSecondThur);
+						liqAdjFilteredData.add(popSum);
+					} catch (ParseException e) {
+						e.printStackTrace();
+					}
+				});*/
+		logger.info("popConsistencySmryRepository size for cob: " + as_of_date +" is: " + existingData.size());
+		return existingData;
+	}
+	
+
+	public void fetchAndSaveDataForCob(Date as_of_date) throws Exception {
+		logger.info("Inside - fetchAndSaveDataForCob - for cob: " + as_of_date);
+		Integer icgStatusJobId = cstIcgStatusRepository.findJobIdCurrentCobDate(as_of_date);
+		Integer popConSmyJobId = populationSmryRepository.findJobIdCurrentCobDate(as_of_date);
+		if(icgStatusJobId!=null && (icgStatusJobId.intValue() != (popConSmyJobId!=null ? popConSmyJobId.intValue():0)))
+		{
+			logger.info("Data Not available for COB in local Table, Fetching data now.. please wait.");
+			fetchAndUpdatePopConsistencySummaryDB(as_of_date);
+		}
+		
+	}
+	
+	public void fetchAndUpdatePopConsistencySummaryDB(Date as_of_date) throws Exception {
+
+		logger.info("Inside - fetchAndUpdatePopConsistencySummaryDB - for cob: " + as_of_date);
+		List<PopulationConsistency> PopConsistencyList = getPopulationConsistenciesForCob(as_of_date);
+
+		Date currentDate = new Date(System.currentTimeMillis());
+		
+	/*	if (PopConsistencyList!=null && PopConsistencyList.size() > 0)
+		{
+			List<CstPopulationSmry> existingData = populationSmryRepository.findByAsOf(PopConsistencyList.get(0).getAsOfDate());
+			List<CstPopulationSmry> existingDataList = new ArrayList<>();
+			if (existingData.size() > 0) {
+				existingData.forEach( existingRow -> {
+					existingRow.setModifiedTime(currentDate);
+					existingDataList.add(existingRow);
+				} );
+				populationSmryRepository.save(existingDataList);
+			}
+		}*/
+		
+		
+		String icgStatusJobId = cstIcgStatusRepository.findJobIdCurrentCobDate(as_of_date).toString();
+		List<CstPopulationSmry> popConSummaryList = new ArrayList<>();
+		
+		Date infDate =  DateUtil.tranformDBformat("9999-12-31", AppConstants.SQL_AS_OF_FORMAT);
+		PopConsistencyList.forEach(	popCon -> {
+				//logger.info("icgStatusJobId"+icgStatusJobId+"popCon"+popCon);
+				if (popCon!=null){
+					CstPopulationSmry summary =  new CstPopulationSmry(icgStatusJobId, popCon.getAsOfDate(), popCon.getScenarioName(), popCon.getFeedingSystem(),
+													String.valueOf(popCon.getFeedingSysCnt()), currentDate, infDate);
+					popConSummaryList.add(summary);
+				}
+				});
+		
+		populationSmryRepository.save(popConSummaryList);
+		logger.info("Completed sourcing and persisting population consistency summary - for cob: " + as_of_date);
+	}
+	
+	@Override
+	@CacheEvict(cacheNames= {"populationConsistencyCache"} , allEntries=true)
+	public String releasePopulationConsistencyCache() {	
+		logger.info("Evicted population Consistency Cache");
+		return "Cleared population Consistency Cache";
+	}
+	
+	class WorkerThread implements Runnable {
+
+		private String feedingSystem;
+		private String feedType;
+		private Date asOf;
+		List<PopulationConsistency> populationConsistencyForScenarioList;
+		private final CountDownLatch latch;
+
+		public WorkerThread(Date asOf, String feedingSystem, String feedType,
+				List<PopulationConsistency> populationConsistencyForScenarioList, CountDownLatch latch) {
+			this.asOf = asOf;
+			this.feedingSystem = feedingSystem;
+			this.feedType = feedType;
+			this.populationConsistencyForScenarioList = populationConsistencyForScenarioList;
+			this.latch= latch;
+		}
+
+		@Override
+		public void run() {
+			logger.info("Started fetching data for feedType - >" + feedingSystem);
+			List<?> currentSummaries = populationReportRepository.getPopulationConsistencyData(asOf, feedingSystem, feedType);
+			SimpleDateFormat format = new SimpleDateFormat("yyyy-MM-dd");
+	        
+			currentSummaries.forEach(obj -> {
+				PopulationConsistency popConsForFeed = null;
+				try {
+					try {
+						popConsForFeed = new PopulationConsistency(((Object[]) obj)[0].toString(),
+								(((Object[]) obj)[1]).toString(), new Integer((((Object[]) obj)[2]).toString()),
+								new java.sql.Date((format.parse((((Object[]) obj)[3]).toString()).getTime())));
+					} catch (ParseException e) {
+						e.printStackTrace();
+					}
+				} catch (NumberFormatException e) {
+					e.printStackTrace();
+				} 
+				if (popConsForFeed != null)
+					populationConsistencyForScenarioList.add(popConsForFeed);
+			});
+			logger.info("Completed fetching data for feedType - >" + feedingSystem);
+			try {
+				Thread.sleep(1000);
+			} catch (InterruptedException e) {
+				e.printStackTrace();
+			}
+			latch.countDown();
+			//logger.info("inside  WorkerThread"+latch.getCount());
+		}
+	}
+	
+	
+	
+	class WorkerCallableThread implements Callable {
+
+		private String feedingSystem;
+		private String feedType;
+		private Date asOf;
+
+		public WorkerCallableThread(Date asOf, String feedingSystem, String feedType) {
+			this.asOf = asOf;
+			this.feedingSystem = feedingSystem;
+			this.feedType = feedType;
+
+		}
+
+		@Override
+		public List<PopulationConsistency> call() {
+			SimpleDateFormat format = new SimpleDateFormat("yyyy-MM-dd");
+			List<PopulationConsistency> populationConsistencyForScenarioList = new ArrayList<>();
+			logger.info("Started fetching data for feedType - >" + feedingSystem);
+			List<?> currentSummaries = populationReportRepository.getPopulationConsistencyData(asOf, feedingSystem,
+					feedType);
+			currentSummaries.forEach(obj -> {
+				PopulationConsistency popConsForFeed = null;
+				try {
+					try {
+						popConsForFeed = new PopulationConsistency(((Object[]) obj)[0].toString(),
+								(((Object[]) obj)[1]).toString(), new Integer((((Object[]) obj)[2]).toString()),
+								new java.sql.Date((format.parse((((Object[]) obj)[3]).toString()).getTime())));
+					} catch (ParseException e) {
+						e.printStackTrace();
+					}
+				} catch (NumberFormatException e) {
+					e.printStackTrace();
+				}
+				if (popConsForFeed != null)
+					populationConsistencyForScenarioList.add(popConsForFeed);
+			});
+			logger.info("Completed fetching data for feedType - >" + feedingSystem);
+			return populationConsistencyForScenarioList;
+		}
+	}
+}
